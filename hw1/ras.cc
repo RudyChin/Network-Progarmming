@@ -22,7 +22,6 @@
 #define MAX_PIPE_LENGTH 5
 #define MAX_COMMAND_LENGTH 257
 #define MAX_PATH_LENGTH 257
-#define TELNET_TCP_PORT 20013
 #define ORIGINAL_PATH "bin"
 #define WR_FILE_MODE (O_CREAT|O_WRONLY|O_TRUNC)
 
@@ -33,7 +32,7 @@ struct fdcounts
     int infd;
     int outfd;
     int counter;
-    
+
     fdcounts(int infd, int outfd, int counter)
     {
         this->infd = infd;
@@ -132,8 +131,8 @@ void parseCmd(int &i, char *inputBuff, char *cmd, char *filename, Sign &sign, in
             i++; //Move to the first digit
             sign = VERTICAL_BAR;
             int posOfPipeLength = 0;
-            
-            if (isSpace(inputBuff[i]))
+
+            if (isSpace(inputBuff[i]) || isReturn(inputBuff[i]))
             {
                 pipeLength[posOfPipeLength++] = '1';
             }
@@ -150,9 +149,9 @@ void parseCmd(int &i, char *inputBuff, char *cmd, char *filename, Sign &sign, in
         else if (inputBuff[i] == '>')
         {
             sign = CLOSE_BRACKET;
-            
+
             while (isSpace(inputBuff[++i]));
-            
+
             while (!isSpace(inputBuff[i]) && !isReturn(inputBuff[i]))
             {
                 filename[posOfFile++] = inputBuff[i++];
@@ -165,7 +164,7 @@ void parseCmd(int &i, char *inputBuff, char *cmd, char *filename, Sign &sign, in
     }
     cmd[posOfCmd] = '\0';
     filename[posOfFile] = '\0';
-    
+
     if (sign == VERTICAL_BAR)
         n = atoi(pipeLength);
     else
@@ -185,8 +184,8 @@ bool isCmdExist(char *path, char *cmd)
     cpyCmd[pos] = '\0';
 
     if (strcmp(cpyCmd, "printenv") == 0 || 
-        strcmp(cpyCmd, "setenv") == 0 ||
-        strcmp(cpyCmd, "exit") == 0 )
+            strcmp(cpyCmd, "setenv") == 0 ||
+            strcmp(cpyCmd, "exit") == 0 )
     {
         return true;
     }
@@ -206,8 +205,8 @@ bool isCmdExist(char *path, char *cmd)
 void recoverFromErrCmd(vector<fdcounts> &counterTable)
 {
     for (vector<fdcounts>::iterator it = counterTable.begin();
-         it != counterTable.end();
-         it++)
+            it != counterTable.end();
+            it++)
     {
         (it->counter)++;
     }
@@ -224,13 +223,13 @@ int processCmd(char *path, char *cmd, int infd, int outfd)
     char *token;
     char *arglist[MAX_COMMAND_LENGTH];
     path = getenv("PATH");
-    
+
     //Check whether there is a slash in cmd
     if (containSlash(cmd))
     {
         return -1;
     }
-    
+
     //Initial total number of arguments
     totalarg = 0;
     //Parse arguments
@@ -241,10 +240,10 @@ int processCmd(char *path, char *cmd, int infd, int outfd)
         totalarg++;
         token = strtok(NULL, " ");
     }
-    
+
     //Null terminated for execv()
     arglist[totalarg] = NULL;
-    
+
     //SETENV, GETENV
     if (strcmp(arglist[0], "printenv") == 0)
     {
@@ -278,7 +277,7 @@ int processCmd(char *path, char *cmd, int infd, int outfd)
     {
         return -1;
     }
-        
+
     childpid = fork();
     if (childpid < 0)
     {
@@ -304,7 +303,7 @@ int processCmd(char *path, char *cmd, int infd, int outfd)
                 exit(-1);
             }
         }
-        
+
         //EXEC
         strcat(path, "/");
         strcat(path, arglist[0]);
@@ -326,6 +325,56 @@ int processCmd(char *path, char *cmd, int infd, int outfd)
     return 0;
 }
 
+int evalOperator(vector<fdcounts> &counterTable, int infd, int outfd, char *path, char *cmd, int sockfd)
+{
+    bool flag = false;
+
+    vector<fdcounts>::iterator it = counterTable.begin();
+    while (it != counterTable.end())
+    {
+        if (it->counter == 0)
+        {
+            flag = true;
+            if (!isCmdExist(path, cmd))
+            {
+                writeErrcmdToSock(sockfd, cmd);
+                recoverFromErrCmd(counterTable);
+                return -1;
+            }
+            close(it->outfd);
+            int status = processCmd(path, cmd, it->infd, outfd);
+            if (status == -1)
+            {
+                return -2;
+            }
+            close(it->infd);
+            counterTable.erase(it);
+        }
+        else
+        {
+            it++;
+        }
+    }
+
+    //Nothing pipe to this and nothing pipe to
+    if (!flag)
+    {
+        if (!isCmdExist(path, cmd))
+        {
+            writeErrcmdToSock(sockfd, cmd);
+            recoverFromErrCmd(counterTable);
+            return -1;
+        }
+        //read from socket, write to socket
+        int status = processCmd(path, cmd, infd, outfd);
+        if (status == -1)
+        {
+            return -2;
+        }
+    } 
+    return 0;
+}
+
 void runShell(int sockfd)
 {
     char inputBuff[MAX_INPUT_LENGTH];
@@ -338,12 +387,12 @@ void runShell(int sockfd)
         perror("change stderr to sock error");
         return;
     }
-    
+
     while(1)
     {
         //Write prompt symbol
         write(sockfd, "% ", 2);
-        
+
         //Reading a line from socket
         int pos = 0;
         char c;
@@ -354,7 +403,7 @@ void runShell(int sockfd)
             if (c == '\n')
                 break;
         }
-        
+
         //Parsing out first command and pipe n
         int i = 0;
         while (!isReturn(inputBuff[i]))
@@ -365,20 +414,20 @@ void runShell(int sockfd)
             bool pipeToSame = false;
             vector<fdcounts>::iterator pipeIt;
             Sign sign = NONE;
-            
+
             //pass through spaces and tabs
             while (isSpace(inputBuff[i]))
             {
                 i++;
             }
-            
+
             //parsing command
             parseCmd(i, inputBuff, cmd, filename, sign, pipeN);
-            
+
             //Decrease every counter by 1
             for (vector<fdcounts>::iterator it = counterTable.begin();
-                 it != counterTable.end();
-                 it++)
+                    it != counterTable.end();
+                    it++)
             {
                 (it->counter)--;
                 if (pipeN == it->counter)
@@ -387,14 +436,15 @@ void runShell(int sockfd)
                     pipeIt = it;
                 }
             }
-            
+
             if (sign == VERTICAL_BAR)
             {
                 //Execute whose counters reach 0
+                int infd = sockfd;
                 int outfd;
                 bool flag = false;
-                bool err_cmd = false;
-                
+                int err_cmd = 0;
+
                 //Reserve pipe
                 if (pipeToSame)
                 {
@@ -410,66 +460,21 @@ void runShell(int sockfd)
                     outfd = pipefd[1];
                 }
 
-                vector<fdcounts>::iterator it = counterTable.begin();
-                while (it != counterTable.end())
+                err_cmd = evalOperator(counterTable, infd, outfd, path, cmd, sockfd);
+                if (err_cmd == -1)
                 {
-                    if (it->counter == 0)
+                    if (!pipeToSame)
                     {
-                        flag = true;
-                        if (!isCmdExist(path, cmd))
-                        {
-                            writeErrcmdToSock(sockfd, cmd);
-                            if (!pipeToSame)
-                            {
-                                close(pipefd[0]);
-                                close(pipefd[1]);
-                            }
-                            err_cmd = true;
-                            break;
-                        }
-                        close(it->outfd);
-                        int status = processCmd(path, cmd, it->infd, outfd);
-                        if (status == -1)
-                        {
-                            return;
-                        }
-                        close(it->infd);
-                        counterTable.erase(it);
+                        close(pipefd[0]);
+                        close(pipefd[1]);
                     }
-                    else
-                    {
-                        it++;
-                    }
-                }
-
-                if (err_cmd)
-                {
-                    recoverFromErrCmd(counterTable);
                     break;
                 }
-
-                //Nothing pipe to this
-                if (!flag)
+                else if (err_cmd == -2)
                 {
-                    if (!isCmdExist(path, cmd))
-                    {
-                        writeErrcmdToSock(sockfd, cmd);
-                        if (!pipeToSame)
-                        {
-                            close(pipefd[0]);
-                            close(pipefd[1]);
-                        }
-                        recoverFromErrCmd(counterTable);
-                        break;
-                    }
-
-                    //socket pipe to this
-                    int status = processCmd(path, cmd, sockfd, outfd);
-                    if (status == -1)
-                    {
-                        return;
-                    }
+                    return;
                 }
+
                 if (!pipeToSame)
                 {
                     counterTable.push_back(fdcounts(pipefd[0], pipefd[1], pipeN));
@@ -478,155 +483,75 @@ void runShell(int sockfd)
             else if (sign == CLOSE_BRACKET)
             {
                 //exec
-                int outfd;
+                int infd = sockfd;
+                int outfd = open(filename, WR_FILE_MODE, S_IWUSR|S_IRUSR);
                 bool flag = false;
-                bool err_cmd = false;
+                int err_cmd = 0;
 
-                vector<fdcounts>::iterator it = counterTable.begin();
-                while (it != counterTable.end())
+                if (outfd == -1)
                 {
-                    if (it->counter == 0)
-                    {
-                        flag = true;
-                        if (!isCmdExist(path, cmd))
-                        {
-                            writeErrcmdToSock(sockfd, cmd);
-                            err_cmd = true;
-                            break;
-                        }
-                        outfd = open(filename, WR_FILE_MODE, S_IWUSR|S_IRUSR);
-                        if (outfd == -1)
-                        {
-                            perror("open error");
-                            break;
-                        }
-                        close(it->outfd);
-                        int status = processCmd(path, cmd, it->infd, outfd);
-                        if (status == -1)
-                        {
-                            return;
-                        }
-                        close(it->infd);
-                        close(outfd);
-                        counterTable.erase(it);
-                    }
-                    else
-                    {
-                        it++;
-                    }
-                }
-                
-                if (err_cmd)
-                {
-                    recoverFromErrCmd(counterTable);
+                    perror("open file error");
                     break;
                 }
-                
-                //Nothing pipe to this and nothing pipe to
-                if (!flag)
+                err_cmd = evalOperator(counterTable, infd, outfd, path, cmd, sockfd);
+                if (err_cmd == -1)
                 {
-                    if (!isCmdExist(path, cmd))
-                    {
-                        writeErrcmdToSock(sockfd, cmd);
-                        recoverFromErrCmd(counterTable);
-                        break;
-                    }
-                    outfd = open(filename, WR_FILE_MODE, S_IWUSR|S_IRUSR);
-                    if (outfd == -1)
-                    {
-                        perror("open error");
-                        break; 
-                    }
-                    
-                    //read from socket, write to socket
-                    int status = processCmd(path, cmd, sockfd, outfd);
-                    if (status == -1)
-                    {
-                        return;
-                    }
-                    close(outfd);
+                    break;
                 }
-                
+                else if (err_cmd == -2)
+                {
+                    return;
+                }
+                close(outfd);
             }
             else
             {
                 //exec
+                int infd = sockfd;
+                int outfd = sockfd;
                 bool flag = false;
-                bool err_cmd = false;
+                int err_cmd = 0;
 
-                vector<fdcounts>::iterator it = counterTable.begin();
-                while (it != counterTable.end())
+                err_cmd = evalOperator(counterTable, infd, outfd, path, cmd, sockfd);
+                if (err_cmd == -1)
                 {
-                    if (it->counter == 0)
-                    {
-                        flag = true;
-                        if (!isCmdExist(path, cmd))
-                        {
-                            writeErrcmdToSock(sockfd, cmd);
-                            err_cmd = true;
-                            break;
-                        }
-                        close(it->outfd);
-                        int status = processCmd(path, cmd, it->infd, sockfd);
-                        if (status == -1)
-                        {
-                            return;
-                        }
-                        close(it->infd);
-                        counterTable.erase(it);
-                    }
-                    else
-                    {
-                        it++;
-                    }
-                }
-
-                if (err_cmd)
-                {
-                    recoverFromErrCmd(counterTable);
                     break;
                 }
-                
-                //Nothing pipe to this and nothing pipe to
-                if (!flag)
+                else if (err_cmd == -2)
                 {
-                    if (!isCmdExist(path, cmd))
-                    {
-                        writeErrcmdToSock(sockfd, cmd);
-                        recoverFromErrCmd(counterTable);
-                        break;
-                    }
-                    //read from socket, write to socket
-                    int status = processCmd(path, cmd, sockfd, sockfd);
-                    if (status == -1)
-                    {
-                        return;
-                    }
-                } 
+                    return;
+                }
             }
         }
     }
-    
+
 }
 
 int main (int argc, char *argv[])
 {
     int sockfd, newsockfd, childpid;
+    if (argc != 2)
+    {
+        printf("Usage: %s <port num>\n", argv[0]);
+        return 1;
+    }
+
+    int TELNET_TCP_PORT = atoi(argv[1]);
     socklen_t clilen;
     struct sockaddr_in cli_addr, serv_addr;
     signal(SIGCHLD, SIG_IGN);
-    
+
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
         perror("server cannot open socket");
         return -1;
     }
-    
+
     bzero((char*)&serv_addr, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     serv_addr.sin_port = htons(TELNET_TCP_PORT);
-    
+
     if(bind(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
     {
         perror("server cannot bind");
